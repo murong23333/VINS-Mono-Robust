@@ -1,3 +1,74 @@
+# VINS-Mono (NTU VIRAL High-Robustness Edition)
+
+**Status**: Stable Release v1.0 (2025-12-25)
+**Maintainer**: Cheng (GitHub: [murong23333](https://github.com/murong23333/VINS-Mono-Robust))
+
+This is a specialized fork of [VINS-Mono](https://github.com/HKUST-Aerial-Robotics/VINS-Mono) optimized for the [NTU VIRAL dataset](https://ntu-aris.github.io/ntu_viral_dataset/) with **UWB Range Fusion** and **Enhanced Robustness**.
+
+---
+
+## 🚀 Key Features
+
+### 1. UWB Range Fusion (UWB + VIO)
+- Integrates Ultra-Wideband (UWB) range measurements for drift-free estimation.
+- **Accuracy**: Achieves **ATE ~0.50m** (RMSE) on NTU VIRAL validation sequences (nya_01).
+- **Comparison**: Pure VIO (No UWB) ~1.10m vs. VIO+UWB ~0.50m (50% Improvement).
+
+### 2. Enhanced Robustness Mechanisms
+- **Drift Recovery**: Implemented `HuberLoss(20.0)` for UWB factors to recover from large drifts (>20m) where standard VIO would fail.
+- **Resilient Alignment**: Relaxed initialization gates allow the system to re-align mid-flight after visual tracking failures.
+- **Gate Disabled**: UWB "Innovation Gate" threshold increased to 100m to prevent lockout during critical drift events.
+
+### 3. Automated Benchmarking
+- Includes a robust Python benchmark suite (`benchmark_10x.py`) for statistical validation.
+- Aggressive environment cleanup (`pkill`) ensures consistent results across repeated runs.
+
+---
+
+## 📦 Quick Start (Docker)
+
+We recommend running this system in the provided Docker container to ensure environment consistency.
+
+### 1. Setup
+```bash
+cd ~/catkin_ws/src/VINS-Mono/docker
+make build
+./run.sh bash
+```
+
+### 2. Run Automated Benchmark
+Inside the container:
+```bash
+cd /root/catkin_ws
+python3 benchmark_10x.py
+```
+This will:
+1. Run the VINS estimator 10 times on the dataset.
+2. Automatically compute Absolute Trajectory Error (ATE) for each run.
+3. Output a statistical summary (Mean, Min, Max).
+
+### 3. Single Run Visualization
+```bash
+/root/catkin_ws/run_viz_eval.sh
+```
+This launches VINS, Rviz, and the evaluation script in one go.
+
+---
+
+## 🛠️ Modifications & Fixes (v1.0)
+
+| Category | Fix/Feature | Description |
+| :--- | :--- | :--- |
+| **Bug Fix** | **UWB Logic Fix** | Fixed a critical bug where `uwb_initialized` was reset to `false`, disabling UWB fusion. |
+| **Robustness** | **Huber Loss** | Replaced `CauchyLoss` with `HuberLoss` for UWB factors to improve gradient behavior at large errors. |
+| **Robustness** | **Gate Relaxation** | Increased UWB rejection threshold to allow recovery from large VIO drifts. |
+| **Stability** | **Process Cleanup** | Added `pkill` logic to specialized scripts to prevent zombie ROS processes from polluting benchmarks. |
+
+---
+
+## 📖 Original VINS-Mono Documentation
+*(Below is the original README from HKUST Aerial Robotics Group)*
+
 # Hello
 
 This is a forked repository of [VINS-Mono](https://github.com/HKUST-Aerial-Robotics/VINS-Mono).
