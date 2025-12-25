@@ -13,6 +13,8 @@ find_package(catkin REQUIRED COMPONENTS
     nav_msgs
     tf
     cv_bridge
+    camera_model
+    uwb_driver
     )
 
 find_package(OpenCV REQUIRED)
@@ -48,6 +50,7 @@ add_executable(vins_estimator
     src/initial/initial_aligment.cpp
     src/initial/initial_sfm.cpp
     src/initial/initial_ex_rotation.cpp
+    src/initial/initial_uwb_alignment.cpp
     )
 
 

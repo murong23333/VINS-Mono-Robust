@@ -32,8 +32,20 @@ class Estimator
 
     // interface
     void processIMU(double t, const Vector3d &linear_acceleration, const Vector3d &angular_velocity);
-    void processImage(const map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> &image, const std_msgs::Header &header);
+    void processImage(const map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> &image, const map<int, vector<pair<int, double>>> &depth_map, const std_msgs::Header &header);
     void setReloFrame(double _frame_stamp, int _frame_index, vector<Vector3d> &_match_points, Vector3d _relo_t, Matrix3d _relo_r);
+    // UWB
+    struct UwbMeasurement {
+        double t;
+        double range;
+        int anchor_id;
+        Eigen::Vector3d tag_offset;
+    };
+    std::vector<UwbMeasurement> uwb_buf;
+    std::map<int, Eigen::Vector3d> uwb_anchors;
+    bool uwb_initialized;
+    void inputUWB(double t, double range, int anchor_id, const Eigen::Vector3d &tag_offset);
+    void initUwbAnchors(std::map<int, std::map<int, double>> &distances);
 
     // internal
     void clearState();
@@ -113,6 +125,7 @@ class Estimator
     double para_Retrive_Pose[SIZE_POSE];
     double para_Td[1][1];
     double para_Tr[1][1];
+    double para_Anchor[200][3]; // Valid for anchor IDs 0-199
 
     int loop_window_index;
 

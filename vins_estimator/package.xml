@@ -42,9 +42,14 @@
   <buildtool_depend>catkin</buildtool_depend>
   <build_depend>roscpp</build_depend>
   <run_depend>roscpp</run_depend>
+  <build_depend>camera_model</build_depend>
+  <run_depend>camera_model</run_depend>
 
 
   <!-- The export tag contains other, unspecified, tags -->
+  <build_depend>uwb_driver</build_depend>
+  <run_depend>uwb_driver</run_depend>
+
   <export>
     <!-- You can specify that this package is a metapackage here: -->
     <!-- <metapackage/> -->

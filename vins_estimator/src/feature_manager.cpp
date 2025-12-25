@@ -42,18 +42,34 @@ int FeatureManager::getFeatureCount()
 }
 
 
-bool FeatureManager::addFeatureCheckParallax(int frame_count, const map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> &image, double td)
+bool FeatureManager::addFeatureCheckParallax(int frame_count, const map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> &image, const map<int, vector<pair<int, double>>> &depth_map, double td)
 {
     ROS_DEBUG("input feature: %d", (int)image.size());
     ROS_DEBUG("num of feature: %d", getFeatureCount());
     double parallax_sum = 0;
     int parallax_num = 0;
     last_track_num = 0;
+    int lidar_depth_cnt = 0;
     for (auto &id_pts : image)
     {
         FeaturePerFrame f_per_fra(id_pts.second[0].second, td);
 
         int feature_id = id_pts.first;
+        /*
+        // Fill Lidar Depth
+        // int feature_id = id_pts.first;
+        if (depth_map.find(feature_id) != depth_map.end()) {
+             // Assuming synchronization aligns so we just take the first one corresponding to the image point
+             // Validation: Check if camera_id matches?
+             // depth_map structure: feature_id -> vector<pair<camera_id, depth>>
+             // Since Mono, camera_id is 0.
+             if (depth_map.at(feature_id).size() > 0) {
+                  f_per_fra.lidar_depth = depth_map.at(feature_id)[0].second;
+                  if (f_per_fra.lidar_depth > 0) lidar_depth_cnt++;
+             }
+        }
+        */
+
         auto it = find_if(feature.begin(), feature.end(), [feature_id](const FeaturePerId &it)
                           {
             return it.feature_id == feature_id;
@@ -70,6 +86,9 @@ bool FeatureManager::addFeatureCheckParallax(int frame_count, const map<int, vec
             last_track_num++;
         }
     }
+    
+    // if (lidar_depth_cnt > 0)
+    //    ROS_INFO_THROTTLE(1.0, "Backend received %d features with Lidar depth", lidar_depth_cnt);
 
     if (frame_count < 2 || last_track_num < 20)
         return true;
@@ -209,6 +228,8 @@ void FeatureManager::triangulate(Vector3d Ps[], Vector3d tic[], Matrix3d ric[])
 
         if (it_per_id.estimated_depth > 0)
             continue;
+
+
         int imu_i = it_per_id.start_frame, imu_j = imu_i - 1;
 
         ROS_ASSERT(NUM_OF_CAM == 1);
@@ -246,6 +267,12 @@ void FeatureManager::triangulate(Vector3d Ps[], Vector3d tic[], Matrix3d ric[])
         //it_per_id->estimated_depth = svd_V[2] / svd_V[3];
 
         it_per_id.estimated_depth = svd_method;
+
+        if (it_per_id.feature_per_frame[0].lidar_depth > 0) {
+             double lid_d = it_per_id.feature_per_frame[0].lidar_depth;
+             ROS_INFO_THROTTLE(0.5, "Depth Compare: Visual %.2f vs Lidar %.2f (Error %.2f)", svd_method, lid_d, fabs(svd_method - lid_d));
+        }
+
         //it_per_id->estimated_depth = INIT_DEPTH;
 
         if (it_per_id.estimated_depth < 0.1)
@@ -255,6 +282,8 @@ void FeatureManager::triangulate(Vector3d Ps[], Vector3d tic[], Matrix3d ric[])
 
     }
 }
+
+
 
 void FeatureManager::removeOutlier()
 {

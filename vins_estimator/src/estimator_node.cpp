@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <queue>
 #include <map>
+#include <uwb_driver/UwbEcho.h>
+#include <uwb_driver/UwbRange.h>
 #include <thread>
 #include <mutex>
 #include <condition_variable>
@@ -10,6 +12,11 @@
 
 #include "estimator.h"
 #include "parameters.h"
+
+// UWB
+std::map<int, std::map<int, double>> uwb_init_distances;
+bool uwb_init_done = false;
+std::vector<uwb_driver::UwbRangeConstPtr> uwb_init_buf;
 #include "utility/visualization.h"
 
 
@@ -205,6 +212,106 @@ void relocalization_callback(const sensor_msgs::PointCloudConstPtr &points_msg)
     m_buf.unlock();
 }
 
+void uwb_echo_callback(const uwb_driver::UwbEchoConstPtr &msg)
+{
+    if (uwb_init_done) return;
+    
+    // Store distance: ensure key order is consistent (min, max)
+    int id1 = std::min((int)msg->requester_id, (int)msg->responder_id);
+    int id2 = std::max((int)msg->requester_id, (int)msg->responder_id);
+    uwb_init_distances[id1][id2] = msg->distance;
+
+    // Check if we have all needed pairs
+    if (uwb_init_distances.count(100) && uwb_init_distances[100].count(101) &&
+        uwb_init_distances.count(100) && uwb_init_distances[100].count(102) &&
+        uwb_init_distances.count(101) && uwb_init_distances[101].count(102))
+    {
+        m_estimator.lock();
+        estimator.initUwbAnchors(uwb_init_distances);
+        m_estimator.unlock();
+        uwb_init_done = true;
+        
+        // Process buffered messages
+        m_estimator.lock();
+        for (const auto &msg : uwb_init_buf)
+        {
+            Eigen::Vector3d buf_offset(msg->rqst_antenna_offset.x, msg->rqst_antenna_offset.y, msg->rqst_antenna_offset.z);
+            estimator.inputUWB(msg->header.stamp.toSec(), msg->distance, msg->responder_id, buf_offset);
+        }
+        uwb_init_buf.clear();
+        m_estimator.unlock();
+    }
+}
+
+void uwb_callback(const uwb_driver::UwbRangeConstPtr &uwb_msg)
+{
+    // If not initialized, buffer it
+    if (!uwb_init_done) 
+    {
+        uwb_init_buf.push_back(uwb_msg);
+        return;
+    }
+
+    // ==========================================
+    // Phase 9: UWB Innovation Gate (Filter)
+    // ==========================================
+    // Only apply filter when system is stable (NON_LINEAR)
+    if (estimator.solver_flag == Estimator::SolverFlag::NON_LINEAR)
+    {
+        Eigen::Vector3d P_imu;
+        Eigen::Quaterniond Q_imu;
+        bool state_valid = false;
+
+        {
+            std::lock_guard<std::mutex> lg(m_state);
+            P_imu = tmp_P;
+            Q_imu = tmp_Q;
+            state_valid = true; 
+        }
+
+        if (state_valid)
+        {
+            int anchor_id = uwb_msg->responder_id;
+            bool anchor_exists = false;
+            Eigen::Vector3d P_anchor;
+            
+            m_estimator.lock();
+            if (estimator.uwb_anchors.count(anchor_id)) {
+                P_anchor = estimator.uwb_anchors[anchor_id];
+                anchor_exists = true;
+            }
+            m_estimator.unlock();
+
+            if (anchor_exists)
+            {
+                Eigen::Vector3d tag_offset(uwb_msg->rqst_antenna_offset.x, uwb_msg->rqst_antenna_offset.y, uwb_msg->rqst_antenna_offset.z);
+                Eigen::Vector3d P_tag_world = P_imu + Q_imu * tag_offset;
+                double dist_pred = (P_tag_world - P_anchor).norm();
+
+                // Gate Logic
+                double innovation = std::abs(uwb_msg->distance - dist_pred);
+                const double GATE_THRESHOLD = 100.0; // 100.0m Effectively disabled to allow VINS to recover from large drift
+
+                if (innovation > GATE_THRESHOLD)
+                {
+                    ROS_WARN_THROTTLE(1.0, "[UWB Gate] REJECT Outlier! ID:%d Meas:%.3f Pred:%.3f Diff:%.3f", 
+                                      anchor_id, uwb_msg->distance, dist_pred, innovation);
+                    return; // Drop this measurement
+                }
+            }
+        }
+    }
+    // ==========================================
+
+    m_estimator.lock();
+    // Debug 4-node support
+    ROS_INFO_THROTTLE(1.0, "UWB Callback hit! ID: %d Dist: %f Init: %d", uwb_msg->responder_id, uwb_msg->distance, uwb_init_done);
+
+    Eigen::Vector3d offset(uwb_msg->rqst_antenna_offset.x, uwb_msg->rqst_antenna_offset.y, uwb_msg->rqst_antenna_offset.z);
+    estimator.inputUWB(uwb_msg->header.stamp.toSec(), uwb_msg->distance, uwb_msg->responder_id, offset);
+    m_estimator.unlock();
+}
+
 // thread: visual-inertial odometry
 void process()
 {
@@ -294,6 +401,7 @@ void process()
 
             TicToc t_s;
             map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> image;
+            map<int, vector<pair<int, double>>> depth_map;
             for (unsigned int i = 0; i < img_msg->points.size(); i++)
             {
                 int v = img_msg->channels[0].values[i] + 0.5;
@@ -306,12 +414,24 @@ void process()
                 double p_v = img_msg->channels[2].values[i];
                 double velocity_x = img_msg->channels[3].values[i];
                 double velocity_y = img_msg->channels[4].values[i];
+                
+                // Extract depth
+                /*
+                double depth = -1;
+                if (img_msg->channels.size() > 5) {
+                    depth = img_msg->channels[5].values[i];
+                }
+                if (depth > 0) {
+                     depth_map[feature_id].emplace_back(camera_id, depth);
+                }
+                */
+
                 ROS_ASSERT(z == 1);
                 Eigen::Matrix<double, 7, 1> xyz_uv_velocity;
                 xyz_uv_velocity << x, y, z, p_u, p_v, velocity_x, velocity_y;
                 image[feature_id].emplace_back(camera_id,  xyz_uv_velocity);
             }
-            estimator.processImage(image, img_msg->header);
+            estimator.processImage(image, depth_map, img_msg->header);
 
             double whole_t = t_s.toc();
             printStatistics(estimator, whole_t);
@@ -345,6 +465,14 @@ int main(int argc, char **argv)
     ros::console::set_logger_level(ROSCONSOLE_DEFAULT_NAME, ros::console::levels::Info);
     readParameters(n);
     estimator.setParameter();
+    
+    // Protection Logic: If anchors are hardcoded, mark init as done to prevent overwrite
+    // This allows inputUWB to receive data immediately for Initialization Alignment
+    if(estimator.uwb_initialized) {
+        uwb_init_done = true;
+        ROS_WARN("UWB Init skipped (Hardcoded in setParameter)");
+    }
+
 #ifdef EIGEN_DONT_PARALLELIZE
     ROS_DEBUG("EIGEN_DONT_PARALLELIZE");
 #endif
@@ -356,6 +484,8 @@ int main(int argc, char **argv)
     ros::Subscriber sub_image = n.subscribe("/feature_tracker/feature", 2000, feature_callback);
     ros::Subscriber sub_restart = n.subscribe("/feature_tracker/restart", 2000, restart_callback);
     ros::Subscriber sub_relo_points = n.subscribe("/pose_graph/match_points", 2000, relocalization_callback);
+    ros::Subscriber sub_uwb = n.subscribe(UWB_TOPIC, 2000, uwb_callback, ros::TransportHints().tcpNoDelay());
+    ros::Subscriber sub_uwb_echo = n.subscribe("/uwb_exorange_info", 100, uwb_echo_callback);
 
     std::thread measurement_process{process};
     ros::spin();

@@ -6,8 +6,39 @@
 #include <std_msgs/Bool.h>
 #include <cv_bridge/cv_bridge.h>
 #include <message_filters/subscriber.h>
+#include <message_filters/sync_policies/approximate_time.h>
+#include <message_filters/synchronizer.h>
+#include <pcl_ros/point_cloud.h>
+#include <pcl/point_cloud.h>
+#include <pcl/point_types.h>
+#include <pcl/common/transforms.h>
+#include <mutex>
+#include <queue>
 
 #include "feature_tracker.h"
+
+struct PointXYZIRT
+{
+    PCL_ADD_POINT4D;
+    float intensity;
+    uint32_t t;
+    uint16_t reflectivity;
+    uint8_t  ring;          // The channel index
+    uint16_t noise;
+    uint32_t range;         // The distance measurement
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+} EIGEN_ALIGN16;
+
+POINT_CLOUD_REGISTER_POINT_STRUCT(PointXYZIRT,
+                                  (float, x, x)
+                                  (float, y, y)
+                                  (float, z, z)
+                                  (float, intensity, intensity)
+                                  (uint32_t, t, t)
+                                  (uint16_t, reflectivity, reflectivity)
+                                  (uint8_t,  ring, ring)
+                                  (uint16_t, noise, noise)
+                                  (uint32_t, range, range))
 
 #define SHOW_UNDISTORTION 0
 
@@ -25,8 +56,67 @@ bool first_image_flag = true;
 double last_image_time = 0;
 bool init_pub = 0;
 
+// Lidar-Camera Extrinsics
+Eigen::Matrix3d R_cl;
+Eigen::Vector3d t_cl;
+// Depth map for current frame
+cv::Mat current_depth_map;
+
+// IMU Buffer for Deskewing
+queue<sensor_msgs::ImuConstPtr> imu_buf;
+std::mutex m_buf;
+
+void imu_callback(const sensor_msgs::ImuConstPtr &imu_msg)
+{
+    m_buf.lock();
+    imu_buf.push(imu_msg);
+    m_buf.unlock();
+}
+
+
+// Robust Depth Lookup
+float getDepthRough(const cv::Mat &depth_map, int u, int v) {
+    const int R = 5; // 5 pixel radius
+    std::vector<float> valid_depths;
+    valid_depths.reserve((2*R+1)*(2*R+1));
+    
+    for (int dy = -R; dy <= R; dy++) {
+        for (int dx = -R; dx <= R; dx++) {
+            int x = u + dx;
+            int y = v + dy;
+            if (x < 0 || x >= depth_map.cols || y < 0 || y >= depth_map.rows) continue;
+            float d = depth_map.at<float>(y, x);
+            if (d > 0.1 && d < 100.0) {
+                valid_depths.push_back(d);
+            }
+        }
+    }
+    
+    if (valid_depths.size() < 3) return -1.0;
+    
+    float sum = 0;
+    for (float d : valid_depths) sum += d;
+    float mean = sum / valid_depths.size();
+    
+    float sq_sum = 0;
+    for (float d : valid_depths) sq_sum += (d - mean) * (d - mean);
+    float std_dev = std::sqrt(sq_sum / valid_depths.size());
+    
+    // If standard deviation is high (> 0.5m), it's an edge/outlier
+    if (std_dev > 0.5) return -1.0;
+    
+    return mean;
+}
+
+// void img_callback(const sensor_msgs::ImageConstPtr &img_msg, const sensor_msgs::PointCloud2ConstPtr &lidar_msg)
 void img_callback(const sensor_msgs::ImageConstPtr &img_msg)
 {
+    // [Removed Lidar Deskewing and Depth Processing logic for pure VINS-Mono]
+    // current_depth_map = cv::Mat::zeros(480, 752, CV_32F); 
+    
+    // --- DESKEWING REMOVED ---
+
+
     if(first_image_flag)
     {
         first_image_flag = false;
@@ -147,6 +237,24 @@ void img_callback(const sensor_msgs::ImageConstPtr &img_msg)
                     v_of_point.values.push_back(cur_pts[j].y);
                     velocity_x_of_point.values.push_back(pts_velocity[j].x);
                     velocity_y_of_point.values.push_back(pts_velocity[j].y);
+                    
+                    // [Removed Depth Lookup]
+                    /*
+                    // Lookup depth in current_depth_map
+                    double depth = -1;
+                    int u = round(cur_pts[j].x); // This is NOT pixel coordinate, cur_pts is pixel
+                    int v = round(cur_pts[j].y);
+                    if (u >= 0 && u < 752 && v >= 0 && v < 480 && !current_depth_map.empty())
+                    {
+                         depth = getDepthRough(current_depth_map, u, v);
+                    }
+                    if (depth > 0) {
+                        // ROS_DEBUG("Feature %d has depth %f", p_id, depth);
+                    }
+                    if (depth > 0) {
+                         // Use depth if available, otherwise -1
+                    }
+                    */
                 }
             }
         }
@@ -155,6 +263,30 @@ void img_callback(const sensor_msgs::ImageConstPtr &img_msg)
         feature_points->channels.push_back(v_of_point);
         feature_points->channels.push_back(velocity_x_of_point);
         feature_points->channels.push_back(velocity_y_of_point);
+        
+        // Add Depth Channel
+        /*
+        sensor_msgs::ChannelFloat32 depth_of_point;
+        depth_of_point.name = "depth";
+        for (int i = 0; i < NUM_OF_CAM; i++) { // Re-iterate to fill depth for all points
+             auto &cur_pts = trackerData[i].cur_pts;
+             auto &ids = trackerData[i].ids;
+             for (unsigned int j = 0; j < ids.size(); j++) {
+                 if (trackerData[i].track_cnt[j] > 1) {
+                     double d = -1;
+                     int u = round(cur_pts[j].x);
+                     int v = round(cur_pts[j].y);
+                     if (u >= 0 && u < 752 && v >= 0 && v < 480 && !current_depth_map.empty())
+                     {
+                          d = getDepthRough(current_depth_map, u, v);
+                     }
+                     depth_of_point.values.push_back(d);
+                 }
+             }
+        }
+        feature_points->channels.push_back(depth_of_point);
+        */
+        
         ROS_DEBUG("publish %f, at %f", feature_points->header.stamp.toSec(), ros::Time::now().toSec());
         // skip the first image; since no optical speed on frist image
         if (!init_pub)
@@ -229,6 +361,26 @@ int main(int argc, char **argv)
     }
 
     ros::Subscriber sub_img = n.subscribe(IMAGE_TOPIC, 100, img_callback);
+    
+    /*
+    // Initialize Extrinsics (Lidar -> Camera)
+    R_cl << -0.01916508, 0.9997437, -0.01205075,
+            -0.01496218, 0.01176483, 0.99981885,
+             0.99970438, 0.01934191, 0.01473287;
+    t_cl << -0.13417409, 0.03958218, -0.05719056;
+
+    // Sync Subscriber
+    typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::Image, sensor_msgs::PointCloud2> MySyncPolicy;
+    message_filters::Subscriber<sensor_msgs::Image> img_sub(n, IMAGE_TOPIC, 100);
+    message_filters::Subscriber<sensor_msgs::PointCloud2> cloud_sub(n, "/os1_cloud_node1/points", 100);
+    
+    // Use large queue size and tolerance for robust sync
+    message_filters::Synchronizer<MySyncPolicy> sync(MySyncPolicy(20), img_sub, cloud_sub);
+    sync.registerCallback(boost::bind(&img_callback, _1, _2));
+
+    // Subscribe to Lidar IMU for deskewing
+    ros::Subscriber sub_imu = n.subscribe("/os1_cloud_node1/imu", 1000, imu_callback);
+    */
 
     pub_img = n.advertise<sensor_msgs::PointCloud>("feature", 1000);
     pub_match = n.advertise<sensor_msgs::Image>("feature_img",1000);

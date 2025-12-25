@@ -28,12 +28,14 @@ class FeaturePerFrame
         velocity.x() = _point(5); 
         velocity.y() = _point(6); 
         cur_td = td;
+        lidar_depth = -1.0;
     }
     double cur_td;
     Vector3d point;
     Vector2d uv;
     Vector2d velocity;
     double z;
+    double lidar_depth; // Lidar depth (default -1)
     bool is_used;
     double parallax;
     MatrixXd A;
@@ -76,7 +78,7 @@ class FeatureManager
 
     int getFeatureCount();
 
-    bool addFeatureCheckParallax(int frame_count, const map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> &image, double td);
+    bool addFeatureCheckParallax(int frame_count, const map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> &image, const map<int, vector<pair<int, double>>> &depth_map, double td);
     void debugShow();
     vector<pair<Vector3d, Vector3d>> getCorresponding(int frame_count_l, int frame_count_r);
 

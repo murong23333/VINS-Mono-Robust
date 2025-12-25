@@ -38,6 +38,11 @@ extern int ESTIMATE_TD;
 extern int ROLLING_SHUTTER;
 extern double ROW, COL;
 
+extern std::string UWB_TOPIC;
+extern Eigen::Vector3d UWB_ANCHOR_POSITION;
+extern double UWB_NOISE_STD;
+extern int UWB_MEASURE_ANCHOR_ID;
+
 
 void readParameters(ros::NodeHandle &n);
 

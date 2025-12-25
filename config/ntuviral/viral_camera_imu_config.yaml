@@ -3,7 +3,17 @@
 #common parameters
 imu_topic:   "/imu/imu"
 image_topic: "/right/image_raw" #"/right/image_mono"
-output_path: "/config/euroc/vins_result.csv"         # to save the pose graph
+output_path: "/root/catkin_ws/vins_output/"         # to save the pose graph
+
+# UWB configuration
+uwb_topic: "/uwb_endorange_info"
+uwb_anchor_position: !!opencv-matrix
+   rows: 3
+   cols: 1
+   dt: d
+   data: [0.0, 0.0, 1.5]
+uwb_noise_std: 0.1
+uwb_measure_anchor_id: 100
 
 #camera calibration 
 model_type:   PINHOLE
@@ -22,7 +32,7 @@ projection_parameters:
    cy: 2.325508916495161e+02
 
 # Extrinsic parameter between IMU and Camera.
-estimate_extrinsic: 1   # 0  Have an accurate extrinsic parameters. We will trust the following imu^R_cam, imu^T_cam, don't change it.
+estimate_extrinsic: 1   # Phase 6 Baseline: 1 (Optimize around initial guess)
                         # 1  Have an initial guess about extrinsic parameters. We will optimize around your initial guess.
                         # 2  Don't know anything about extrinsic parameters. You don't need to give R,T. We will try to calibrate it. Do some rotation movement at beginning. 
 
@@ -75,4 +85,4 @@ loop_closure: 1   #if you want to use loop closure to minimize the drift, set lo
 # voc_file:     "/support_files/brief_k10L6.bin"
 min_loop_num: 25
 
-pose_graph_save_path: "/home/tmn/output/pose_graph/"  # save and load path
+pose_graph_save_path: "/output/pose_graph/"  # save and load path

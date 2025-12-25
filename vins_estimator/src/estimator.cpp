@@ -1,4 +1,8 @@
 #include "estimator.h"
+#include "factor/uwb_factor.h"
+#include "factor/depth_factor.h"
+#include "initial/initial_ex_rotation.h"
+#include "initial/initial_uwb_alignment.h" // Added by instruction
 
 Estimator::Estimator(): f_manager{Rs}
 {
@@ -17,6 +21,38 @@ void Estimator::setParameter()
     ProjectionFactor::sqrt_info = FOCAL_LENGTH / 1.5 * Matrix2d::Identity();
     ProjectionTdFactor::sqrt_info = FOCAL_LENGTH / 1.5 * Matrix2d::Identity();
     td = TD;
+
+    // Manual UWB Initialization (Robust Fix for nya_01)
+    if (UWB_MEASURE_ANCHOR_ID == 100) 
+    {
+        // Hardcoded geometry based on nya_01.bag internal metadata
+        // RESTORED: Document confirms 101 is +X axis, 102 is -Y side.
+        uwb_anchors[100] = Eigen::Vector3d(0.0, 0.0, 1.5);
+        uwb_anchors[101] = Eigen::Vector3d(14.7267000198, 0.0, 1.5); // Ref-X
+        uwb_anchors[102] = Eigen::Vector3d(5.46200108607, -11.891041089, 1.5); // -Y Side
+        
+        uwb_initialized = true;
+        ROS_INFO("UWB 3-Anchor System Manually Initialized for nya_01 (Bag Config)");
+        ROS_INFO("100: 0.0 0.0 1.5");
+        ROS_INFO("101: 14.7267 0.0 1.5");
+        ROS_INFO("102: 5.462 -11.891 1.5");
+    }
+    else if (UWB_MEASURE_ANCHOR_ID != 0)
+    {
+        uwb_anchors[UWB_MEASURE_ANCHOR_ID] = UWB_ANCHOR_POSITION;
+        uwb_initialized = true;
+        ROS_INFO("UWB Single Anchor Manually Initialized ID %d at %f %f %f", 
+             UWB_MEASURE_ANCHOR_ID, UWB_ANCHOR_POSITION.x(), UWB_ANCHOR_POSITION.y(), UWB_ANCHOR_POSITION.z());
+    }
+    // Sync to parameter block
+    for(auto &kv : uwb_anchors) {
+        int id = kv.first;
+        if(id < 200) {
+            para_Anchor[id][0] = kv.second.x();
+            para_Anchor[id][1] = kv.second.y();
+            para_Anchor[id][2] = kv.second.z();
+        }
+    }
 }
 
 void Estimator::clearState()
@@ -117,11 +153,61 @@ void Estimator::processIMU(double dt, const Vector3d &linear_acceleration, const
     gyr_0 = angular_velocity;
 }
 
-void Estimator::processImage(const map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> &image, const std_msgs::Header &header)
+// UWB Input with Anchor ID and Tag Offset
+void Estimator::inputUWB(double t, double range, int anchor_id, const Eigen::Vector3d &tag_offset)
+{
+    if (!uwb_initialized) return;
+    if (uwb_anchors.find(anchor_id) == uwb_anchors.end()) return; // Unknown anchor
+
+    UwbMeasurement meas;
+    meas.t = t;
+    meas.range = range;
+    meas.anchor_id = anchor_id;
+    meas.tag_offset = tag_offset;
+    uwb_buf.push_back(meas);
+}
+
+void Estimator::initUwbAnchors(std::map<int, std::map<int, double>> &distances)
+{
+    // Need distances: 100-101, 100-102, 101-102
+    if (!distances.count(100) || !distances.count(101)) return;
+    
+    double d_100_101 = distances[100][101];
+    double d_100_102 = distances[100][102];
+    double d_101_102 = distances[101][102];
+
+    if (d_100_101 <= 0 || d_100_102 <= 0 || d_101_102 <= 0) return;
+
+    // Anchor 100 at origin (z=1.5)
+    uwb_anchors[100] = Eigen::Vector3d(0.0, 0.0, 1.5);
+
+    // Anchor 101 on X-axis
+    uwb_anchors[101] = Eigen::Vector3d(d_100_101, 0.0, 1.5);
+
+    // Anchor 102 via triangulation
+    // x^2 + y^2 = d_100_102^2
+    // (x - x_101)^2 + y^2 = d_101_102^2
+    double x_101 = d_100_101;
+    double x_102 = (pow(x_101, 2) - pow(d_101_102, 2) + pow(d_100_102, 2)) / (2 * x_101);
+    double y_102_sq = pow(d_100_102, 2) - pow(x_102, 2);
+    
+    if (y_102_sq < 0) y_102_sq = 0;
+    double y_102 = -sqrt(y_102_sq); // User said "side of space", usually negative y in this setup
+
+    uwb_anchors[102] = Eigen::Vector3d(x_102, y_102, 1.5);
+
+    uwb_initialized = true;
+    ROS_INFO("UWB Anchors Initialized:");
+    ROS_INFO("100: %f %f %f", uwb_anchors[100].x(), uwb_anchors[100].y(), uwb_anchors[100].z());
+    ROS_INFO("101: %f %f %f", uwb_anchors[101].x(), uwb_anchors[101].y(), uwb_anchors[101].z());
+    ROS_INFO("102: %f %f %f", uwb_anchors[102].x(), uwb_anchors[102].y(), uwb_anchors[102].z());
+}
+
+void Estimator::processImage(const map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> &image, const map<int, vector<pair<int, double>>> &depth_map, const std_msgs::Header &header)
 {
     ROS_DEBUG("new image coming ------------------------------------------");
     ROS_DEBUG("Adding feature points %lu", image.size());
-    if (f_manager.addFeatureCheckParallax(frame_count, image, td))
+    if (f_manager.addFeatureCheckParallax(frame_count, image, depth_map, td))
         marginalization_flag = MARGIN_OLD;
     else
         marginalization_flag = MARGIN_SECOND_NEW;
@@ -134,6 +220,7 @@ void Estimator::processImage(const map<int, vector<pair<int, Eigen::Matrix<doubl
 
     ImageFrame imageframe(image, header.stamp.toSec());
     imageframe.pre_integration = tmp_pre_integration;
+    all_image_frame.insert(make_pair(header.stamp.toSec(), imageframe));
     all_image_frame.insert(make_pair(header.stamp.toSec(), imageframe));
     tmp_pre_integration = new IntegrationBase{acc_0, gyr_0, Bas[frame_count], Bgs[frame_count]};
 
@@ -436,6 +523,60 @@ bool Estimator::visualInitialAlign()
     ROS_DEBUG_STREAM("g0     " << g.transpose());
     ROS_DEBUG_STREAM("my R0  " << Utility::R2ypr(Rs[0]).transpose()); 
 
+    // ==========================================
+    // Phase: UWB 4-DOF Alignment (Yaw + Translation)
+    // ==========================================
+    ROS_WARN("[Init] Checking UWB Alignment... Init: %d, BufSize: %d", uwb_initialized, (int)uwb_buf.size());
+
+    // Only perform if UWB is initialized and we have data
+    if (uwb_initialized && !uwb_buf.empty())
+    {
+        // 1. Prepare Data Vectors
+        vector<double> t_uwb;
+        vector<double> r_uwb;
+        vector<int> id_uwb;
+        
+        for(const auto& u : uwb_buf) {
+            t_uwb.push_back(u.t);
+            r_uwb.push_back(u.range);
+            id_uwb.push_back(u.anchor_id);
+        }
+
+        // 2. Solve Alignment
+        double yaw_align = 0;
+        Vector3d t_align = Vector3d::Zero();
+        
+        bool success = solveUwbAlignment(Ps, Rs, Headers, frame_count, 
+                                         t_uwb, r_uwb, id_uwb, uwb_anchors, 
+                                         yaw_align, t_align);
+
+        if(success)
+        {
+            // 3. Apply Transformation
+            // R_align = R_z(yaw)
+            Matrix3d R_align;
+            R_align = AngleAxisd(yaw_align, Vector3d::UnitZ());
+
+            for(int i = 0; i <= frame_count; i++)
+            {
+                // P_new = R * P_old + t
+                Ps[i] = R_align * Ps[i] + t_align;
+                
+                // V_new = R * V_old
+                Vs[i] = R_align * Vs[i];
+                
+                // R_new = R * R_old
+                Rs[i] = R_align * Rs[i];
+            }
+            ROS_WARN("[Init] VIO-UWB Alignment Applied. VINS trajectory moved to correct frame.");
+        }
+        else
+        {
+            ROS_WARN("[Init] VIO-UWB Alignment Failed. Continuing with local frame (Expect huge residuals).");
+        }
+    }
+    // ==========================================
+
     return true;
 }
 
@@ -525,6 +666,16 @@ void Estimator::vector2double()
         para_Feature[i][0] = dep(i);
     if (ESTIMATE_TD)
         para_Td[0][0] = td;
+        
+    // UWB Anchors to Array
+    for(auto &kv : uwb_anchors) {
+        int id = kv.first;
+        if(id < 200) {
+            para_Anchor[id][0] = kv.second.x();
+            para_Anchor[id][1] = kv.second.y();
+            para_Anchor[id][2] = kv.second.z();
+        }
+    }
 }
 
 void Estimator::double2vector()
@@ -616,6 +767,16 @@ void Estimator::double2vector()
         relocalization_info = 0;    
 
     }
+    
+    // Array to UWB Anchors (Update Map)
+    for(auto &kv : uwb_anchors) {
+        int id = kv.first;
+        if(id < 200) {
+            kv.second.x() = para_Anchor[id][0];
+            kv.second.y() = para_Anchor[id][1];
+            kv.second.z() = para_Anchor[id][2];
+        }
+    }
 }
 
 bool Estimator::failureDetection()
@@ -672,6 +833,7 @@ void Estimator::optimization()
     ceres::Problem problem;
     ceres::LossFunction *loss_function;
     //loss_function = new ceres::HuberLoss(1.0);
+    first_imu = false;
     loss_function = new ceres::CauchyLoss(1.0);
     for (int i = 0; i < WINDOW_SIZE + 1; i++)
     {
@@ -761,10 +923,125 @@ void Estimator::optimization()
             }
             f_m_cnt++;
         }
+
+        // [Phase 5] Tight Coupling with Depth Factor (DISABLED for removal)
+        /*
+        if (it_per_id.feature_per_frame[0].lidar_depth > 0)
+        {
+             double lidar_inv = 1.0 / it_per_id.feature_per_frame[0].lidar_depth;
+             double est_inv = para_Feature[feature_index][0];
+             double diff = est_inv - lidar_inv;
+             
+             // Gating: Only add factor if visual and lidar are roughly consistent 
+             // (prevents solver explosion from outliers/deskew errors)
+             // Phase 6 Baseline: Threshold 2.0, Weight 1.0
+             if (std::abs(diff) < 2.0) 
+             {
+                 // Weight = 1.0 for now. Lidar is trusted.
+                 problem.AddResidualBlock(DepthFactor::Create(it_per_id.feature_per_frame[0].lidar_depth, 1.0), 
+                                          loss_function, para_Feature[feature_index]);
+                 
+                 ROS_DEBUG("Depth Factor Added: EstInv %.3f vs LidarInv %.3f (Diff %.3f)", est_inv, lidar_inv, diff);
+             }
+             else
+             {
+                 ROS_WARN_THROTTLE(1.0, "Depth Factor Rejected (Outlier): EstInv %.3f vs LidarInv %.3f (Diff %.3f)", 
+                                   est_inv, lidar_inv, diff);
+             }
+        }
+        */
     }
 
     ROS_DEBUG("visual measurement count: %d", f_m_cnt);
     ROS_DEBUG("prepare for ceres: %f", t_prepare.toc());
+
+    // UWB factor
+    // UWB factor
+    bool estimate_uwb_anchor = false; // Disable Self-Calibration (Trust Hardcoded Anchors)
+    std::unordered_map<int, bool> anchor_block_added;
+
+    // Dedicated Loss Function for UWB with large scale (20.0m) to allow recovery from large drift
+    ceres::LossFunction *uwb_loss_function = new ceres::HuberLoss(20.0);
+
+    for (auto it = uwb_buf.begin(); it != uwb_buf.end();)
+    {
+        double t = it->t;
+        double range = it->range;
+        int anchor_id = it->anchor_id;
+        Eigen::Vector3d tag_offset = it->tag_offset;
+        
+        if (t < Headers[0].stamp.toSec() - 2.0) 
+        {
+            it = uwb_buf.erase(it);
+            continue;
+        }
+
+        // Find closest frame to UWB measurement
+        double min_dt = 1000.0;
+        int closest_frame_idx = -1;
+
+        for (int i = 0; i <= frame_count; i++)
+        {
+            double t_frame = Headers[i].stamp.toSec();
+            double dt = std::abs(t - t_frame);
+            if (dt < min_dt)
+            {
+                min_dt = dt;
+                closest_frame_idx = i;
+            }
+        }
+        
+        if (min_dt < 0.1 && closest_frame_idx != -1)
+        {
+             if (estimate_uwb_anchor && anchor_id < 200)
+             {
+                 // Add Anchor Parameter Block if not already added
+                 // Add Anchor Parameter Block if not already added
+                 if (anchor_block_added.find(anchor_id) == anchor_block_added.end())
+                 {
+                     // Plan B: Strong Constraints to Fix Gauge Freedom (Yaw & Translation)
+                     if (anchor_id == 100)
+                     {
+                         // Anchor 100: Fix Origin (0,0,1.5)
+                         problem.AddParameterBlock(para_Anchor[anchor_id], 3);
+                         problem.SetParameterBlockConstant(para_Anchor[anchor_id]);
+                     }
+                     else if (anchor_id == 101)
+                     {
+                         // Anchor 101: Fix Y and Z, Optimize X (Defines X-Axis)
+                         // Document confirms 101 is on +X axis.
+                         // Indices to keep constant: {1, 2} (0-based)
+                         std::vector<int> constant_indices;
+                         constant_indices.push_back(1); // Fix Y
+                         constant_indices.push_back(2); // Fix Z
+                         ceres::SubsetParameterization *subset_parameterization = 
+                            new ceres::SubsetParameterization(3, constant_indices);
+                         problem.AddParameterBlock(para_Anchor[anchor_id], 3, subset_parameterization);
+                     }
+                     else
+                     {
+                         // Other Anchors (102+): Free to move
+                         problem.AddParameterBlock(para_Anchor[anchor_id], 3);
+                     }
+                     anchor_block_added[anchor_id] = true;
+                 }
+
+                 // UWB Anchor Factor (Variables: Pose, Anchor)
+                 ceres::CostFunction *uwb_factor = new ceres::AutoDiffCostFunction<UwbAnchorFactorFunctor, 1, 7, 3>(
+                    new UwbAnchorFactorFunctor(tag_offset, range, UWB_NOISE_STD));
+                 problem.AddResidualBlock(uwb_factor, uwb_loss_function, para_Pose[closest_frame_idx], para_Anchor[anchor_id]);
+             }
+             else
+             {
+                 // Old Fixed Anchor Factor
+                 Eigen::Vector3d anchor_pos = uwb_anchors[anchor_id];
+                 ceres::CostFunction *uwb_factor = new ceres::AutoDiffCostFunction<UwbFactorFunctor, 1, 7>(
+                    new UwbFactorFunctor(anchor_pos, tag_offset, range, UWB_NOISE_STD));
+                 problem.AddResidualBlock(uwb_factor, uwb_loss_function, para_Pose[closest_frame_idx]);
+             }
+        }
+        it++;
+    }
 
     if(relocalization_info)
     {

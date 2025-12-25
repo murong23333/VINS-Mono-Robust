@@ -11,6 +11,8 @@ find_package(catkin REQUIRED COMPONENTS
     sensor_msgs
     cv_bridge
     camera_model
+    pcl_ros
+    pcl_conversions
     )
 
 find_package(OpenCV REQUIRED)
@@ -35,3 +37,6 @@ add_executable(feature_tracker
     )
 
 target_link_libraries(feature_tracker ${catkin_LIBRARIES} ${OpenCV_LIBS})
+
+add_executable(depth_verification_node src/depth_verification_node.cpp)
+target_link_libraries(depth_verification_node ${catkin_LIBRARIES} ${OpenCV_LIBS})

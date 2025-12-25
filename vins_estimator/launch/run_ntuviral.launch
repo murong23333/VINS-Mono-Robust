@@ -5,7 +5,7 @@
 
 
     <!-- log direction for the vis aid -->
-    <arg name="log_dir" default="/home/$(env USER)/output/pose_graph" />
+    <arg name="log_dir" default="/root/output/pose_graph" />
 
 
     <!-- ######### Choose the dataset ################################### -->
@@ -45,15 +45,30 @@
     <node pkg="tf2_ros" type="static_transform_publisher" name="camera_to_pointcloudframe1"
           args="0 0 0 0 0 1.57 /camera /pointcloudframe" />
 
+    <!-- Benchmark Publisher (Ground Truth in gt_world frame) -->
+    <node name="benchmark_publisher" pkg="benchmark_publisher" type="benchmark_publisher" output="screen">
+        <param name="data_name" type="string" value="$(find benchmark_publisher)/config/nya_01/data.csv" />
+        <param name="odometry_frame" type="string" value="gt_world" />
+        <remap from="~estimated_odometry" to="/vins_estimator/odometry" />
+    </node>
 
+    <!-- MANUAL TF: GT to UWB Frame (OPTIMAL CALC: -1.31 rad, Z=-2.94m) -->
+    <node pkg="tf2_ros" type="static_transform_publisher" name="world_to_gt_world"
+          args="7.45 -2.39 -2.94 -1.31 0 0 world gt_world" />
+
+
+    <!-- Run the rviz node (DISABLED for Headless Benchmarking) -->
     <!-- Run the rviz node -->
-    <node pkg="rviz" type="rviz" name="rviz" respawn="true"
-          args="-d $(find vins_estimator)/../config/ntuviral/rviz_ntuviral.rviz" />
+    <arg name="enable_rviz" default="true" />
+    <group if="$(arg enable_rviz)">
+        <node pkg="rviz" type="rviz" name="rviz" respawn="false"
+              args="-d $(find vins_estimator)/../config/ntuviral/rviz_ntuviral.rviz" />
+    </group>
 
 
     <!-- ######### Play the dataset ###################################### -->
     <param name ="/use_sim_time" value="true"/>
     <node required="$(arg autorun)" pkg="rosbag" type="play" name="rosbag_play"
-          args="--clock $(arg bag_file)" output="log"/>
+          args="--clock -r 1.0 $(arg bag_file)" output="log"/>
 
 </launch>

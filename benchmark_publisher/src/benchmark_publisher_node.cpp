@@ -63,7 +63,7 @@ Quaterniond baseRgt;
 Vector3d baseTgt;
 tf::Transform trans;
 
-void odom_callback(const nav_msgs::OdometryConstPtr &odom_msg)
+void odom_callback(const nav_msgs::OdometryConstPtr &odom_msg, std::string frame_id)
 {
     //ROS_INFO("odom callback!");
     if (odom_msg->header.stamp.toSec() > benchmark.back().t)
@@ -75,25 +75,16 @@ void odom_callback(const nav_msgs::OdometryConstPtr &odom_msg)
 
     if (init++ < SKIP)
     {
-        baseRgt = Quaterniond(odom_msg->pose.pose.orientation.w,
-                              odom_msg->pose.pose.orientation.x,
-                              odom_msg->pose.pose.orientation.y,
-                              odom_msg->pose.pose.orientation.z) *
-                  Quaterniond(benchmark[idx - 1].qw,
-                              benchmark[idx - 1].qx,
-                              benchmark[idx - 1].qy,
-                              benchmark[idx - 1].qz).inverse();
-        baseTgt = Vector3d{odom_msg->pose.pose.position.x,
-                           odom_msg->pose.pose.position.y,
-                           odom_msg->pose.pose.position.z} -
-                  baseRgt * Vector3d{benchmark[idx - 1].px, benchmark[idx - 1].py, benchmark[idx - 1].pz};
+        // DISABLE Auto-Alignment. Trust Manual TF.
+        baseRgt.setIdentity();
+        baseTgt.setZero();
         return;
     }
 
     nav_msgs::Odometry odometry;
     odometry.header.stamp = ros::Time(benchmark[idx - 1].t);
-    odometry.header.frame_id = "world";
-    odometry.child_frame_id = "world";
+    odometry.header.frame_id = frame_id;
+    odometry.child_frame_id = frame_id;
 
     Vector3d tmp_T = baseTgt + baseRgt * Vector3d{benchmark[idx - 1].px, benchmark[idx - 1].py, benchmark[idx - 1].pz};
     odometry.pose.pose.position.x = tmp_T.x();
@@ -131,7 +122,7 @@ int main(int argc, char **argv)
     ros::NodeHandle n("~");
 
     string csv_file = readParam<string>(n, "data_name");
-    std::cout << "load ground truth " << csv_file << std::endl;
+    string odometry_frame = readParam<string>(n, "odometry_frame");
     FILE *f = fopen(csv_file.c_str(), "r");
     if (f==NULL)
     {
@@ -153,7 +144,8 @@ int main(int argc, char **argv)
     pub_odom = n.advertise<nav_msgs::Odometry>("odometry", 1000);
     pub_path = n.advertise<nav_msgs::Path>("path", 1000);
 
-    ros::Subscriber sub_odom = n.subscribe("estimated_odometry", 1000, odom_callback);
+    // Lambda to capture frame
+    ros::Subscriber sub_odom = n.subscribe<nav_msgs::Odometry>("estimated_odometry", 1000, boost::bind(odom_callback, _1, odometry_frame));
     
     ros::Rate r(20);
     ros::spin();

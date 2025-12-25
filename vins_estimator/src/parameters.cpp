@@ -20,6 +20,10 @@ int ROLLING_SHUTTER;
 std::string EX_CALIB_RESULT_PATH;
 std::string VINS_RESULT_PATH;
 std::string IMU_TOPIC;
+std::string UWB_TOPIC;
+Eigen::Vector3d UWB_ANCHOR_POSITION;
+double UWB_NOISE_STD;
+int UWB_MEASURE_ANCHOR_ID;
 double ROW, COL;
 double TD, TR;
 
@@ -50,6 +54,12 @@ void readParameters(ros::NodeHandle &n)
     }
 
     fsSettings["imu_topic"] >> IMU_TOPIC;
+    fsSettings["uwb_topic"] >> UWB_TOPIC;
+    fsSettings["uwb_noise_std"] >> UWB_NOISE_STD;
+    cv::Mat cv_anchor;
+    fsSettings["uwb_anchor_position"] >> cv_anchor;
+    cv::cv2eigen(cv_anchor, UWB_ANCHOR_POSITION);
+    fsSettings["uwb_measure_anchor_id"] >> UWB_MEASURE_ANCHOR_ID;
 
     SOLVER_TIME = fsSettings["max_solver_time"];
     NUM_ITERATIONS = fsSettings["max_num_iterations"];

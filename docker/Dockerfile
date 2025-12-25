@@ -16,7 +16,8 @@ RUN   if [ "x$(nproc)" = "x1" ] ; then export USE_PROC=1 ; \
       ros-${ROS_DISTRO}-cv-bridge \
       ros-${ROS_DISTRO}-image-transport \
       ros-${ROS_DISTRO}-message-filters \
-      ros-${ROS_DISTRO}-tf && \
+      ros-${ROS_DISTRO}-tf \
+      ros-${ROS_DISTRO}-rviz && \
       rm -rf /var/lib/apt/lists/* && \
       # Build and install Ceres
       git clone https://ceres-solver.googlesource.com/ceres-solver && \
