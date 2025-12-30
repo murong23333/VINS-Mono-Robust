@@ -1,0 +1,7 @@
+### 2.3 Robust Estimation and Failure Recovery
+
+Robustness against sensor outliers is a central theme in state estimation. Standard techniques involve the use of M-estimators (e.g., Huber, Cauchy, Tukey) [10] or Switchable Constraints [11] to dynamically down-weight inconsistent measurements. The core principle of these methods is to reduce the "influence function" (the gradient of the loss) as the residual error increases. For example, the Cauchy and Tukey loss functions have influence functions that asymptotically approach zero for large residuals, effectively ignoring data points deemed to be gross outliers.
+
+While effective for rejecting spurious measurements (e.g., UWB multipath echoes), this "suppression" behavior becomes detrimental when the large residual stems from a gross state error rather than sensor noise. In the event of a visual tracking failure where the VIO drifts significantly (e.g., > 10m), accurate UWB measurements will yield large residuals. Standard robust estimators will incorrectly classify these valid correcting signals as outliers and suppress them, thereby cementing the drift. 
+
+State recovery in VIO is predominantly addressed through loop closure [1, 12] or map-based relocalization [13]. However, these methods rely on the assumption of revisiting a previously mapped environment. In contrast, our work addresses the problem of **"blind" recovery**—utilizing sparse global anchors to correct gross estimation errors without a prior map and without relying on revisiting a location, a capability critical for exploration missions.
