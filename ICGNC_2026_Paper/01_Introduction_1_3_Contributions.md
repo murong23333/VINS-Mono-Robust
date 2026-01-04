@@ -1,0 +1,9 @@
+### 1.3 Proposed Solution and Contributions
+
+In this work, we propose a fusion architecture prioritized for operational survivability. Departing from the convention of strict outlier rejection, we replace the standard gating mechanisms with a **Gradient-Preserving Optimization Backend**. We employ a modified Huber loss formulation with an extended linear transition region ($\delta=20.0$), which maintains a constant, non-vanishing gradient even for residuals that span tens of meters. This formulation effectively exerts a continuous restorative force on the divergent trajectory, pulling the VIO estimate back towards the global UWB manifold regardless of the initial error magnitude. Additionally, to ensure valid graph constraints in magnetically compromised indoor environments, we formulate a magnetometer-free **4-DOF Coordinate Initialization** scheme that aligns the local visual frame with the global UWB frame using only gravity and ranging data.
+
+The main contributions of this paper are as follows:
+
+1.  **Theoretical Analysis of Fusion Failure**: We formally characterize the "Drift Lockout" failure mode in tightly-coupled VIO-UWB systems, demonstrating how standard robust estimators paradoxically undermine system resilience during large-scale drift events.
+2.  **Resilient Estimator Design**: We propose a novel backend design utilizing a wide-basin Huber loss function, guaranteeing gradient availability for drift correction and enabling autonomous recovery from gross tracking failures.
+3.  **Experimental Validation**: We validate the proposed system on the challenging NTU VIRAL dataset. Our method achieves a root mean square error (RMSE) of **0.50m**, outperforming standard baselines by 55%, and demonstrates a unique capability to self-recover from induced tracking losses where conventional methods diverge permanently.

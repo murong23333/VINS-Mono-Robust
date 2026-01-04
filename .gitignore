@@ -1,0 +1,31 @@
+# ROS build artifacts
+build/
+devel/
+logs/
+.catkin_workspace
+.catkin_tools/
+
+# Large Datasets
+*.bag
+*.pcd
+
+# VS Code
+.vscode/
+
+# LaTeX Intermediate Files
+*.aux
+*.log
+*.out
+*.synctex.gz
+*.toc
+*.fls
+*.fdb_latexmk
+
+# Python
+__pycache__/
+*.pyc
+
+# Temporary files
+*.tmp
+*.bak
+*~
