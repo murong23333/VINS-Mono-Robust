@@ -156,9 +156,6 @@ void Estimator::processIMU(double dt, const Vector3d &linear_acceleration, const
 // UWB Input with Anchor ID and Tag Offset
 void Estimator::inputUWB(double t, double range, int anchor_id, const Eigen::Vector3d &tag_offset)
 {
-    if (!uwb_initialized) return;
-    if (uwb_anchors.find(anchor_id) == uwb_anchors.end()) return; // Unknown anchor
-
     UwbMeasurement meas;
     meas.t = t;
     meas.range = range;
@@ -166,6 +163,7 @@ void Estimator::inputUWB(double t, double range, int anchor_id, const Eigen::Vec
     meas.tag_offset = tag_offset;
     uwb_buf.push_back(meas);
 }
+
 
 void Estimator::initUwbAnchors(std::map<int, std::map<int, double>> &distances)
 {
@@ -832,9 +830,9 @@ void Estimator::optimization()
 {
     ceres::Problem problem;
     ceres::LossFunction *loss_function;
-    //loss_function = new ceres::HuberLoss(1.0);
+    //loss_function = new ceres::HuberLoss(20.0);
     first_imu = false;
-    loss_function = new ceres::CauchyLoss(1.0);
+    loss_function = new ceres::HuberLoss(20.0);
     for (int i = 0; i < WINDOW_SIZE + 1; i++)
     {
         ceres::LocalParameterization *local_parameterization = new PoseLocalParameterization();
@@ -860,242 +858,283 @@ void Estimator::optimization()
     }
 
     TicToc t_whole, t_prepare;
+    ROS_ERROR("[CARF] Enter Optimization Function");
     vector2double();
 
-    if (last_marginalization_info)
-    {
-        // construct new marginlization_factor
-        MarginalizationFactor *marginalization_factor = new MarginalizationFactor(last_marginalization_info);
-        problem.AddResidualBlock(marginalization_factor, NULL,
-                                 last_marginalization_parameter_blocks);
-    }
+    // [CARF] Backup parameters before optimization to allow rollback
+    double backup_Pose[WINDOW_SIZE + 1][SIZE_POSE];
+    double backup_SpeedBias[WINDOW_SIZE + 1][SIZE_SPEEDBIAS];
+    double backup_Feature[NUM_OF_F][SIZE_FEATURE];
+    double backup_Ex_Pose[NUM_OF_CAM][SIZE_POSE];
+    double backup_Retrive_Pose[SIZE_POSE];
+    double backup_Td[1][1];
+    
+    // Simple backup copy
+    memcpy(backup_Pose, para_Pose, sizeof(para_Pose));
+    memcpy(backup_SpeedBias, para_SpeedBias, sizeof(para_SpeedBias));
+    memcpy(backup_Feature, para_Feature, sizeof(para_Feature));
+    memcpy(backup_Ex_Pose, para_Ex_Pose, sizeof(para_Ex_Pose));
+    memcpy(backup_Retrive_Pose, relo_Pose, sizeof(relo_Pose));
+    memcpy(backup_Td, para_Td, sizeof(para_Td));
 
-    for (int i = 0; i < WINDOW_SIZE; i++)
+    // CARF Loop: Pass 0 (Optimistic Huber), Pass 1 (Pessimistic Cauchy)
+    // Default to Cauchy if Pass 0 violates physics (IMU Consistency).
+    for (int carf_pass = 0; carf_pass < 2; carf_pass++)
     {
-        int j = i + 1;
-        if (pre_integrations[j]->sum_dt > 10.0)
-            continue;
-        IMUFactor* imu_factor = new IMUFactor(pre_integrations[j]);
-        problem.AddResidualBlock(imu_factor, NULL, para_Pose[i], para_SpeedBias[i], para_Pose[j], para_SpeedBias[j]);
-    }
-    int f_m_cnt = 0;
-    int feature_index = -1;
-    for (auto &it_per_id : f_manager.feature)
-    {
-        it_per_id.used_num = it_per_id.feature_per_frame.size();
-        if (!(it_per_id.used_num >= 2 && it_per_id.start_frame < WINDOW_SIZE - 2))
-            continue;
- 
-        ++feature_index;
-
-        int imu_i = it_per_id.start_frame, imu_j = imu_i - 1;
+        ceres::Problem problem;
+        ceres::LossFunction *loss_function;
+        //loss_function = new ceres::HuberLoss(1.0);
+        loss_function = new ceres::CauchyLoss(1.0);
         
-        Vector3d pts_i = it_per_id.feature_per_frame[0].point;
+        ceres::LossFunction *uwb_loss_function;
+        if (carf_pass == 0) {
+            // Optimistic Recovery Mode
+            uwb_loss_function = new ceres::HuberLoss(20.0);
+        } else {
+            // Pessimistic Rejection Mode (Fallback)
+            uwb_loss_function = new ceres::CauchyLoss(1.0);
+            
+            // Restore Parameters for clean start
+            memcpy(para_Pose, backup_Pose, sizeof(para_Pose));
+            memcpy(para_SpeedBias, backup_SpeedBias, sizeof(para_SpeedBias));
+            memcpy(para_Feature, backup_Feature, sizeof(para_Feature));
+            memcpy(para_Ex_Pose, backup_Ex_Pose, sizeof(para_Ex_Pose));
+            memcpy(relo_Pose, backup_Retrive_Pose, sizeof(relo_Pose));
+            memcpy(para_Td, backup_Td, sizeof(para_Td));
+        }
 
-        for (auto &it_per_frame : it_per_id.feature_per_frame)
+        std::vector<ceres::ResidualBlockId> imu_block_ids;
+
+        for (int i = 0; i < WINDOW_SIZE + 1; i++)
         {
-            imu_j++;
-            if (imu_i == imu_j)
+            ceres::LocalParameterization *local_parameterization = new PoseLocalParameterization();
+            problem.AddParameterBlock(para_Pose[i], SIZE_POSE, local_parameterization);
+            problem.AddParameterBlock(para_SpeedBias[i], SIZE_SPEEDBIAS);
+        }
+        for (int i = 0; i < NUM_OF_CAM; i++)
+        {
+            ceres::LocalParameterization *local_parameterization = new PoseLocalParameterization();
+            problem.AddParameterBlock(para_Ex_Pose[i], SIZE_POSE, local_parameterization);
+            if (!ESTIMATE_EXTRINSIC)
             {
+                problem.SetParameterBlockConstant(para_Ex_Pose[i]);
+            }
+        }
+        if (ESTIMATE_TD)
+        {
+            problem.AddParameterBlock(para_Td[0], 1);
+            //problem.SetParameterBlockConstant(para_Td[0]);
+        }
+
+        if (last_marginalization_info)
+        {
+            // construct new marginlization_factor
+            MarginalizationFactor *marginalization_factor = new MarginalizationFactor(last_marginalization_info);
+            problem.AddResidualBlock(marginalization_factor, NULL,
+                                     last_marginalization_parameter_blocks);
+        }
+
+        for (int i = 0; i < WINDOW_SIZE; i++)
+        {
+            int j = i + 1;
+            if (pre_integrations[j]->sum_dt > 10.0)
                 continue;
-            }
-            Vector3d pts_j = it_per_frame.point;
-            if (ESTIMATE_TD)
-            {
-                    ProjectionTdFactor *f_td = new ProjectionTdFactor(pts_i, pts_j, it_per_id.feature_per_frame[0].velocity, it_per_frame.velocity,
-                                                                     it_per_id.feature_per_frame[0].cur_td, it_per_frame.cur_td,
-                                                                     it_per_id.feature_per_frame[0].uv.y(), it_per_frame.uv.y());
-                    problem.AddResidualBlock(f_td, loss_function, para_Pose[imu_i], para_Pose[imu_j], para_Ex_Pose[0], para_Feature[feature_index], para_Td[0]);
-                    /*
-                    double **para = new double *[5];
-                    para[0] = para_Pose[imu_i];
-                    para[1] = para_Pose[imu_j];
-                    para[2] = para_Ex_Pose[0];
-                    para[3] = para_Feature[feature_index];
-                    para[4] = para_Td[0];
-                    f_td->check(para);
-                    */
-            }
-            else
-            {
-                ProjectionFactor *f = new ProjectionFactor(pts_i, pts_j);
-                problem.AddResidualBlock(f, loss_function, para_Pose[imu_i], para_Pose[imu_j], para_Ex_Pose[0], para_Feature[feature_index]);
-            }
-            f_m_cnt++;
+            IMUFactor* imu_factor = new IMUFactor(pre_integrations[j]);
+            ceres::ResidualBlockId id = problem.AddResidualBlock(imu_factor, NULL, para_Pose[i], para_SpeedBias[i], para_Pose[j], para_SpeedBias[j]);
+            imu_block_ids.push_back(id);
         }
-
-        // [Phase 5] Tight Coupling with Depth Factor (DISABLED for removal)
-        /*
-        if (it_per_id.feature_per_frame[0].lidar_depth > 0)
-        {
-             double lidar_inv = 1.0 / it_per_id.feature_per_frame[0].lidar_depth;
-             double est_inv = para_Feature[feature_index][0];
-             double diff = est_inv - lidar_inv;
-             
-             // Gating: Only add factor if visual and lidar are roughly consistent 
-             // (prevents solver explosion from outliers/deskew errors)
-             // Phase 6 Baseline: Threshold 2.0, Weight 1.0
-             if (std::abs(diff) < 2.0) 
-             {
-                 // Weight = 1.0 for now. Lidar is trusted.
-                 problem.AddResidualBlock(DepthFactor::Create(it_per_id.feature_per_frame[0].lidar_depth, 1.0), 
-                                          loss_function, para_Feature[feature_index]);
-                 
-                 ROS_DEBUG("Depth Factor Added: EstInv %.3f vs LidarInv %.3f (Diff %.3f)", est_inv, lidar_inv, diff);
-             }
-             else
-             {
-                 ROS_WARN_THROTTLE(1.0, "Depth Factor Rejected (Outlier): EstInv %.3f vs LidarInv %.3f (Diff %.3f)", 
-                                   est_inv, lidar_inv, diff);
-             }
-        }
-        */
-    }
-
-    ROS_DEBUG("visual measurement count: %d", f_m_cnt);
-    ROS_DEBUG("prepare for ceres: %f", t_prepare.toc());
-
-    // UWB factor
-    // UWB factor
-    bool estimate_uwb_anchor = false; // Disable Self-Calibration (Trust Hardcoded Anchors)
-    std::unordered_map<int, bool> anchor_block_added;
-
-    // Dedicated Loss Function for UWB with large scale (20.0m) to allow recovery from large drift
-    ceres::LossFunction *uwb_loss_function = new ceres::HuberLoss(20.0);
-
-    for (auto it = uwb_buf.begin(); it != uwb_buf.end();)
-    {
-        double t = it->t;
-        double range = it->range;
-        int anchor_id = it->anchor_id;
-        Eigen::Vector3d tag_offset = it->tag_offset;
-        
-        if (t < Headers[0].stamp.toSec() - 2.0) 
-        {
-            it = uwb_buf.erase(it);
-            continue;
-        }
-
-        // Find closest frame to UWB measurement
-        double min_dt = 1000.0;
-        int closest_frame_idx = -1;
-
-        for (int i = 0; i <= frame_count; i++)
-        {
-            double t_frame = Headers[i].stamp.toSec();
-            double dt = std::abs(t - t_frame);
-            if (dt < min_dt)
-            {
-                min_dt = dt;
-                closest_frame_idx = i;
-            }
-        }
-        
-        if (min_dt < 0.1 && closest_frame_idx != -1)
-        {
-             if (estimate_uwb_anchor && anchor_id < 200)
-             {
-                 // Add Anchor Parameter Block if not already added
-                 // Add Anchor Parameter Block if not already added
-                 if (anchor_block_added.find(anchor_id) == anchor_block_added.end())
-                 {
-                     // Plan B: Strong Constraints to Fix Gauge Freedom (Yaw & Translation)
-                     if (anchor_id == 100)
-                     {
-                         // Anchor 100: Fix Origin (0,0,1.5)
-                         problem.AddParameterBlock(para_Anchor[anchor_id], 3);
-                         problem.SetParameterBlockConstant(para_Anchor[anchor_id]);
-                     }
-                     else if (anchor_id == 101)
-                     {
-                         // Anchor 101: Fix Y and Z, Optimize X (Defines X-Axis)
-                         // Document confirms 101 is on +X axis.
-                         // Indices to keep constant: {1, 2} (0-based)
-                         std::vector<int> constant_indices;
-                         constant_indices.push_back(1); // Fix Y
-                         constant_indices.push_back(2); // Fix Z
-                         ceres::SubsetParameterization *subset_parameterization = 
-                            new ceres::SubsetParameterization(3, constant_indices);
-                         problem.AddParameterBlock(para_Anchor[anchor_id], 3, subset_parameterization);
-                     }
-                     else
-                     {
-                         // Other Anchors (102+): Free to move
-                         problem.AddParameterBlock(para_Anchor[anchor_id], 3);
-                     }
-                     anchor_block_added[anchor_id] = true;
-                 }
-
-                 // UWB Anchor Factor (Variables: Pose, Anchor)
-                 ceres::CostFunction *uwb_factor = new ceres::AutoDiffCostFunction<UwbAnchorFactorFunctor, 1, 7, 3>(
-                    new UwbAnchorFactorFunctor(tag_offset, range, UWB_NOISE_STD));
-                 problem.AddResidualBlock(uwb_factor, uwb_loss_function, para_Pose[closest_frame_idx], para_Anchor[anchor_id]);
-             }
-             else
-             {
-                 // Old Fixed Anchor Factor
-                 Eigen::Vector3d anchor_pos = uwb_anchors[anchor_id];
-                 ceres::CostFunction *uwb_factor = new ceres::AutoDiffCostFunction<UwbFactorFunctor, 1, 7>(
-                    new UwbFactorFunctor(anchor_pos, tag_offset, range, UWB_NOISE_STD));
-                 problem.AddResidualBlock(uwb_factor, uwb_loss_function, para_Pose[closest_frame_idx]);
-             }
-        }
-        it++;
-    }
-
-    if(relocalization_info)
-    {
-        //printf("set relocalization factor! \n");
-        ceres::LocalParameterization *local_parameterization = new PoseLocalParameterization();
-        problem.AddParameterBlock(relo_Pose, SIZE_POSE, local_parameterization);
-        int retrive_feature_index = 0;
+        int f_m_cnt = 0;
         int feature_index = -1;
         for (auto &it_per_id : f_manager.feature)
         {
             it_per_id.used_num = it_per_id.feature_per_frame.size();
             if (!(it_per_id.used_num >= 2 && it_per_id.start_frame < WINDOW_SIZE - 2))
                 continue;
+     
             ++feature_index;
-            int start = it_per_id.start_frame;
-            if(start <= relo_frame_local_index)
-            {   
-                while((int)match_points[retrive_feature_index].z() < it_per_id.feature_id)
+    
+            int imu_i = it_per_id.start_frame, imu_j = imu_i - 1;
+            
+            Vector3d pts_i = it_per_id.feature_per_frame[0].point;
+    
+            for (auto &it_per_frame : it_per_id.feature_per_frame)
+            {
+                imu_j++;
+                if (imu_i == imu_j)
                 {
-                    retrive_feature_index++;
+                    continue;
                 }
-                if((int)match_points[retrive_feature_index].z() == it_per_id.feature_id)
+                Vector3d pts_j = it_per_frame.point;
+                if (ESTIMATE_TD)
                 {
-                    Vector3d pts_j = Vector3d(match_points[retrive_feature_index].x(), match_points[retrive_feature_index].y(), 1.0);
-                    Vector3d pts_i = it_per_id.feature_per_frame[0].point;
-                    
+                        ProjectionTdFactor *f_td = new ProjectionTdFactor(pts_i, pts_j, it_per_id.feature_per_frame[0].velocity, it_per_frame.velocity,
+                                                                         it_per_id.feature_per_frame[0].cur_td, it_per_frame.cur_td,
+                                                                         it_per_id.feature_per_frame[0].uv.y(), it_per_frame.uv.y());
+                        problem.AddResidualBlock(f_td, loss_function, para_Pose[imu_i], para_Pose[imu_j], para_Ex_Pose[0], para_Feature[feature_index], para_Td[0]);
+                }
+                else
+                {
                     ProjectionFactor *f = new ProjectionFactor(pts_i, pts_j);
-                    problem.AddResidualBlock(f, loss_function, para_Pose[start], relo_Pose, para_Ex_Pose[0], para_Feature[feature_index]);
-                    retrive_feature_index++;
-                }     
+                    problem.AddResidualBlock(f, loss_function, para_Pose[imu_i], para_Pose[imu_j], para_Ex_Pose[0], para_Feature[feature_index]);
+                }
+                f_m_cnt++;
             }
         }
+    
+        ROS_DEBUG("visual measurement count: %d", f_m_cnt);
+        // UWB factor
+        bool estimate_uwb_anchor = false; 
+        std::unordered_map<int, bool> anchor_block_added;
+        for (auto it = uwb_buf.begin(); it != uwb_buf.end();)
+        {
+            double t = it->t;
+            double range = it->range;
+            int anchor_id = it->anchor_id;
+            Eigen::Vector3d tag_offset = it->tag_offset;
+            
+            if (t < Headers[0].stamp.toSec() - 2.0) 
+            {
+                it = uwb_buf.erase(it);
+                continue;
+            }
+    
+            double min_dt = 1000.0;
+            int closest_frame_idx = -1;
+            for (int i = 0; i <= frame_count; i++)
+            {
+                double t_frame = Headers[i].stamp.toSec();
+                double dt = std::abs(t - t_frame);
+                if (dt < min_dt)
+                {
+                    min_dt = dt;
+                    closest_frame_idx = i;
+                }
+            }
+            
+            if (min_dt < 0.1 && closest_frame_idx != -1)
+            {
+                 if (estimate_uwb_anchor && anchor_id < 200)
+                 {
+                     if (anchor_block_added.find(anchor_id) == anchor_block_added.end())
+                     {
+                         if (anchor_id == 100)
+                         {
+                             problem.AddParameterBlock(para_Anchor[anchor_id], 3);
+                             problem.SetParameterBlockConstant(para_Anchor[anchor_id]);
+                         }
+                         else if (anchor_id == 101)
+                         {
+                             std::vector<int> constant_indices;
+                             constant_indices.push_back(1); 
+                             constant_indices.push_back(2); 
+                             ceres::SubsetParameterization *subset_parameterization = 
+                                new ceres::SubsetParameterization(3, constant_indices);
+                             problem.AddParameterBlock(para_Anchor[anchor_id], 3, subset_parameterization);
+                         }
+                         else
+                         {
+                             problem.AddParameterBlock(para_Anchor[anchor_id], 3);
+                         }
+                         anchor_block_added[anchor_id] = true;
+                     }
+    
+                     ceres::CostFunction *uwb_factor = new ceres::AutoDiffCostFunction<UwbAnchorFactorFunctor, 1, 7, 3>(
+                        new UwbAnchorFactorFunctor(tag_offset, range, UWB_NOISE_STD));
+                     problem.AddResidualBlock(uwb_factor, uwb_loss_function, para_Pose[closest_frame_idx], para_Anchor[anchor_id]);
+                 }
+                 else
+                 {
+                     Eigen::Vector3d anchor_pos = uwb_anchors[anchor_id];
+                     ceres::CostFunction *uwb_factor = new ceres::AutoDiffCostFunction<UwbFactorFunctor, 1, 7>(
+                        new UwbFactorFunctor(anchor_pos, tag_offset, range, UWB_NOISE_STD));
+                     problem.AddResidualBlock(uwb_factor, uwb_loss_function, para_Pose[closest_frame_idx]);
+                 }
+            }
+            it++;
+        }
+    
+        if(relocalization_info)
+        {
+            ceres::LocalParameterization *local_parameterization = new PoseLocalParameterization();
+            problem.AddParameterBlock(relo_Pose, SIZE_POSE, local_parameterization);
+            int retrive_feature_index = 0;
+            int feature_index = -1;
+            for (auto &it_per_id : f_manager.feature)
+            {
+                it_per_id.used_num = it_per_id.feature_per_frame.size();
+                if (!(it_per_id.used_num >= 2 && it_per_id.start_frame < WINDOW_SIZE - 2))
+                    continue;
+                ++feature_index;
+                int start = it_per_id.start_frame;
+                if(start <= relo_frame_local_index)
+                {   
+                    while((int)match_points[retrive_feature_index].z() < it_per_id.feature_id)
+                    {
+                        retrive_feature_index++;
+                    }
+                    if((int)match_points[retrive_feature_index].z() == it_per_id.feature_id)
+                    {
+                        Vector3d pts_j = Vector3d(match_points[retrive_feature_index].x(), match_points[retrive_feature_index].y(), 1.0);
+                        Vector3d pts_i = it_per_id.feature_per_frame[0].point;
+                        
+                        ProjectionFactor *f = new ProjectionFactor(pts_i, pts_j);
+                        problem.AddResidualBlock(f, loss_function, para_Pose[start], relo_Pose, para_Ex_Pose[0], para_Feature[feature_index]);
+                        retrive_feature_index++;
+                    }     
+                }
+            }
+    
+        }
+    
+        ceres::Solver::Options options;
+    
+        options.linear_solver_type = ceres::DENSE_SCHUR;
+        //options.num_threads = 2;
+        options.trust_region_strategy_type = ceres::DOGLEG;
+        options.max_num_iterations = NUM_ITERATIONS;
+        //options.use_explicit_schur_complement = true;
+        //options.minimizer_progress_to_stdout = true;
+        //options.use_nonmonotonic_steps = true;
+        if (marginalization_flag == MARGIN_OLD)
+            options.max_solver_time_in_seconds = SOLVER_TIME * 4.0 / 5.0;
+        else
+            options.max_solver_time_in_seconds = SOLVER_TIME;
+        TicToc t_solver;
+        ceres::Solver::Summary summary;
+        // ROS_ERROR("[CARF] Pass %d: Starting Solve...", carf_pass);
+        ceres::Solve(options, &problem, &summary);
+        // ROS_ERROR("[CARF] Pass %d: Solve Finished. Time: %.3f ms", carf_pass, t_solver.toc());
+        //cout << summary.BriefReport() << endl;
+        //ROS_DEBUG("Iterations : %d", static_cast<int>(summary.iterations.size()));
+        //ROS_DEBUG("solver costs: %f", t_solver.toc());
+        
+        // CARF Check: If Pass 0 (Huber), check IMU consistency
+        if (carf_pass == 0)
+        {
+            double imu_cost = 0;
+            ceres::Problem::EvaluateOptions eval_options;
+            eval_options.residual_blocks = imu_block_ids;
+            // ROS_ERROR("[CARF] Pass 0: Evaluating IMU residuals (Count: %d)...", (int)imu_block_ids.size());
+            problem.Evaluate(eval_options, &imu_cost, nullptr, nullptr, nullptr);
+            // ROS_ERROR("[CARF] Pass 0: Evaluation Done. Cost: %.3f", imu_cost);
+            
+            double avg_imu_chi2 = 0;
+            if (imu_block_ids.size() > 0)
+                avg_imu_chi2 = 2.0 * imu_cost / imu_block_ids.size();
 
-    }
-
-    ceres::Solver::Options options;
-
-    options.linear_solver_type = ceres::DENSE_SCHUR;
-    //options.num_threads = 2;
-    options.trust_region_strategy_type = ceres::DOGLEG;
-    options.max_num_iterations = NUM_ITERATIONS;
-    //options.use_explicit_schur_complement = true;
-    //options.minimizer_progress_to_stdout = true;
-    //options.use_nonmonotonic_steps = true;
-    if (marginalization_flag == MARGIN_OLD)
-        options.max_solver_time_in_seconds = SOLVER_TIME * 4.0 / 5.0;
-    else
-        options.max_solver_time_in_seconds = SOLVER_TIME;
-    TicToc t_solver;
-    ceres::Solver::Summary summary;
-    ceres::Solve(options, &problem, &summary);
-    //cout << summary.BriefReport() << endl;
-    ROS_DEBUG("Iterations : %d", static_cast<int>(summary.iterations.size()));
-    ROS_DEBUG("solver costs: %f", t_solver.toc());
+            // Threshold: 150.0 (Conservative Physics Check)
+            if (avg_imu_chi2 > 150.0)
+            {
+                ROS_WARN("[CARF] Pass 0 Failed! IMU Chi2: %.2f > 150.0. Reverting to Cauchy...", avg_imu_chi2);
+                continue; // Trigger Pass 1
+            }
+            else
+            {
+                // ROS_DEBUG("[CARF] Pass 0 Success. IMU Chi2: %.2f.", avg_imu_chi2);
+                break; // Done
+            }
+        }
+    } // End CARF Loop
 
     double2vector();
 

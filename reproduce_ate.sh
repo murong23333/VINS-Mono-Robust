@@ -6,9 +6,9 @@ CONTAINER_NAME="vins_container"
 IMAGE_NAME="ros:vins-mono"
 HOST_WS="/home/cheng/catkin_ws"
 CONTAINER_WS="/root/catkin_ws"
-HOST_DATA="/home/cheng/nya_01"
+HOST_DATA="/home/cheng/sbs_02"
 CONTAINER_DATA="/data"
-BAG_NAME="nya_01.bag"
+BAG_NAME="sbs_02.bag"
 HOST_OUTPUT="$HOST_WS/vins_output"
 # =================================================
 
@@ -17,28 +17,21 @@ echo "   VINS-Mono Benchmarking (Docker Edition)    "
 echo "=============================================="
 
 # 1. Check/Start Container
-echo "[Infra] Checking Docker Container: $CONTAINER_NAME..."
-if [ ! "$(docker ps -q -f name=$CONTAINER_NAME)" ]; then
-    if [ "$(docker ps -aq -f status=exited -f name=$CONTAINER_NAME)" ]; then
-        echo "        Container exists but stopped. Starting..."
-        docker start $CONTAINER_NAME
-    else
-        echo "        Container not found. Creating and starting..."
-        # Note: Added --net=host and privileged for hardware access if needed, though mostly using bag here.
-        # Added volume mounts reflecting PROJECT_CONTEXT.md
-        docker run -d --name $CONTAINER_NAME \
-            --net=host \
-            --privileged \
-            --entrypoint /bin/bash \
-            -v $HOST_WS:$CONTAINER_WS \
-            -v $HOST_DATA:$CONTAINER_DATA \
-            -e DISPLAY=$DISPLAY \
-            -v /tmp/.X11-unix:/tmp/.X11-unix \
-            $IMAGE_NAME -c "tail -f /dev/null"
-    fi
-else
-    echo "        Container is already running."
-fi
+echo "[Infra] Restarting Docker Container: $CONTAINER_NAME..."
+docker rm -f $CONTAINER_NAME || true
+
+echo "        Creating and starting container..."
+# Note: Added --net=host and privileged for hardware access if needed, though mostly using bag here.
+# Added volume mounts reflecting PROJECT_CONTEXT.md
+docker run -d --name $CONTAINER_NAME \
+    --net=host \
+    --privileged \
+    --entrypoint /bin/bash \
+    -v $HOST_WS:$CONTAINER_WS \
+    -v $HOST_DATA:$CONTAINER_DATA \
+    -e DISPLAY=$DISPLAY \
+    -v /tmp/.X11-unix:/tmp/.X11-unix \
+    $IMAGE_NAME -c "tail -f /dev/null"
 
 # 2. Setup VINS Environment inside Docker
 echo "[Setup] Cleaning previous state..."
@@ -51,7 +44,7 @@ docker exec $CONTAINER_NAME bash -c "rm -f /root/catkin_ws/vins_output/*.csv"
 echo "[Setup] Sourcing workspace in container..."
 # Ensure output directory exists and copy Ground Truth
 docker exec $CONTAINER_NAME bash -c "mkdir -p /root/catkin_ws/vins_output"
-docker exec $CONTAINER_NAME bash -c "cp /root/catkin_ws/src/VINS-Mono/benchmark_publisher/config/nya_01/data.csv /root/catkin_ws/vins_output/leica_pose.csv"
+docker exec $CONTAINER_NAME bash -c "cp /root/catkin_ws/data_logs/sbs_02_gt.csv /root/catkin_ws/vins_output/leica_pose.csv"
 
 # BUILD WORKSPACE
 echo "[Build] Building workspace inside Docker..."

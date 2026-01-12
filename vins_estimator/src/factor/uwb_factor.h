@@ -107,3 +107,71 @@ struct UwbAnchorFactorFunctor
     double measurement;
     double noise_std;
 };
+
+// [Switchable Constraints]
+// Factor connecting Switch Variable (s), Pose (P,Q), and Anchor (A)
+// Residual = s * (dist - measurement) / noise
+struct SwitchableUwbFactorFunctor
+{
+    SwitchableUwbFactorFunctor(const Eigen::Vector3d &_tag_offset, double _measurement, double _noise_std)
+        : tag_offset(_tag_offset), measurement(_measurement), noise_std(_noise_std)
+    {
+    }
+
+    template <typename T>
+    bool operator()(const T *const s, const T *const pose, const T *const anchor_pos, T *residual) const
+    {
+        // s[0] is the switch variable [0, 1]
+        
+        T p[3] = {pose[0], pose[1], pose[2]};
+        T q[4]; 
+        q[0] = pose[6]; // w
+        q[1] = pose[3]; // x
+        q[2] = pose[4]; // y
+        q[3] = pose[5]; // z
+        
+        T uwb_anchor[3] = {anchor_pos[0], anchor_pos[1], anchor_pos[2]};
+        T t_offset[3] = {T(tag_offset.x()), T(tag_offset.y()), T(tag_offset.z())};
+        T p_tag_offset[3];
+        ceres::QuaternionRotatePoint(q, t_offset, p_tag_offset);
+        
+        T p_tag[3];
+        p_tag[0] = p[0] + p_tag_offset[0];
+        p_tag[1] = p[1] + p_tag_offset[1];
+        p_tag[2] = p[2] + p_tag_offset[2];
+        
+        T dist = sqrt(pow(p_tag[0] - uwb_anchor[0], 2) +
+                      pow(p_tag[1] - uwb_anchor[1], 2) +
+                      pow(p_tag[2] - uwb_anchor[2], 2));
+                      
+        // Weighted Residual
+        residual[0] = s[0] * (dist - T(measurement)) / T(noise_std);
+        
+        return true;
+    }
+
+    Eigen::Vector3d tag_offset;
+    double measurement;
+    double noise_std;
+};
+
+// [Switchable Constraints]
+// Factor putting prior on Switch Variable (s)
+// Residual = sqrt_gamma * (1.0 - s)
+// Cost = gamma * (1-s)^2
+struct SwitchPriorFactorFunctor
+{
+    SwitchPriorFactorFunctor(double _gamma_sqrt)
+        : gamma_sqrt(_gamma_sqrt)
+    {
+    }
+
+    template <typename T>
+    bool operator()(const T *const s, T *residual) const
+    {
+        residual[0] = T(gamma_sqrt) * (T(1.0) - s[0]);
+        return true;
+    }
+
+    double gamma_sqrt;
+};
